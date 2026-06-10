@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Skill(run)",
+      "Bash(chromium-cli *)",
+      "Bash(node -e \"const {chromium} = require\\('playwright'\\); console.log\\('playwright ok'\\)\")",
+      "Bash(curl -sf http://localhost:3000)",
+      "Bash(curl -sf http://localhost:3000/static/js/bundle.js)",
+      "Bash(node --input-type=module --eval ' *)",
+      "Bash(npm run *)"
+    ]
+  }
+}

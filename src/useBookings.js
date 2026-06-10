@@ -1,21 +1,8 @@
 import { useState, useEffect, useRef } from 'react';
 
-const STORAGE_KEY = 'tvättstuga_bookings';
+const API = 'http://localhost:5000';
 const TIME_SLOTS = ['08-10', '10-12', '12-14', '14-16', '16-18', '18-20'];
 
-function loadBookings() {
-  try {
-    return JSON.parse(localStorage.getItem(STORAGE_KEY)) || {};
-  } catch {
-    return {};
-  }
-}
-
-function saveBookings(bookings) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(bookings));
-}
-
-// key: "YYYY-MM-DD|slot" → apartment string
 function slotKey(date, slot) {
   return `${date}|${slot}`;
 }
@@ -32,10 +19,29 @@ function slotStartMs(dateStr, slot) {
 }
 
 export function useBookings(apartment) {
-  const [bookings, setBookings] = useState(loadBookings);
+  // { "YYYY-MM-DD|slot": apartmentName }
+  const [bookings, setBookings] = useState({});
+  // { "YYYY-MM-DD|slot": numericId } — needed for DELETE
+  const bookingIds = useRef({});
   const notifTimers = useRef({});
 
-  // Schedule a notification 30 min before a slot
+  useEffect(() => {
+    fetch(`${API}/bookings`)
+      .then((r) => r.json())
+      .then((data) => {
+        const map = {};
+        const ids = {};
+        data.forEach((b) => {
+          const key = slotKey(b.date, b.slot);
+          map[key] = b.name;
+          ids[key] = b.id;
+        });
+        setBookings(map);
+        bookingIds.current = ids;
+      })
+      .catch(console.error);
+  }, []);
+
   function scheduleNotification(dateStr, slot) {
     const key = slotKey(dateStr, slot);
     if (notifTimers.current[key]) return;
@@ -60,7 +66,6 @@ export function useBookings(apartment) {
     delete notifTimers.current[key];
   }
 
-  // Re-register notifications on mount / bookings change
   useEffect(() => {
     if (!apartment) return;
     Object.entries(bookings).forEach(([key, apt]) => {
@@ -90,33 +95,64 @@ export function useBookings(apartment) {
     return myBookingsForDay(dateStr).length < 2;
   }
 
-  function book(dateStr, slot) {
+  async function book(dateStr, slot) {
     const key = slotKey(dateStr, slot);
     if (bookings[key]) return false;
     if (!canBook(dateStr)) return false;
 
-    const next = { ...bookings, [key]: apartment };
-    saveBookings(next);
-    setBookings(next);
+    // Optimistic update
+    setBookings((prev) => ({ ...prev, [key]: apartment }));
 
-    if (Notification.permission === 'default') {
-      Notification.requestPermission().then((p) => {
-        if (p === 'granted') scheduleNotification(dateStr, slot);
+    try {
+      const res = await fetch(`${API}/bookings`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ date: dateStr, slot, name: apartment }),
       });
-    } else {
-      scheduleNotification(dateStr, slot);
+      if (!res.ok) throw new Error('Conflict');
+      const data = await res.json();
+      bookingIds.current[key] = data.id;
+
+      if (Notification.permission === 'default') {
+        Notification.requestPermission().then((p) => {
+          if (p === 'granted') scheduleNotification(dateStr, slot);
+        });
+      } else {
+        scheduleNotification(dateStr, slot);
+      }
+      return true;
+    } catch {
+      // Revert optimistic update
+      setBookings((prev) => {
+        const next = { ...prev };
+        delete next[key];
+        return next;
+      });
+      return false;
     }
-    return true;
   }
 
-  function cancel(dateStr, slot) {
+  async function cancel(dateStr, slot) {
     const key = slotKey(dateStr, slot);
     if (bookings[key] !== apartment) return;
-    const next = { ...bookings };
-    delete next[key];
-    saveBookings(next);
-    setBookings(next);
+    const id = bookingIds.current[key];
+
+    // Optimistic update
+    setBookings((prev) => {
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
     cancelNotification(dateStr, slot);
+
+    try {
+      const res = await fetch(`${API}/bookings/${id}`, { method: 'DELETE' });
+      if (!res.ok) throw new Error('Not found');
+      delete bookingIds.current[key];
+    } catch {
+      // Revert optimistic update
+      setBookings((prev) => ({ ...prev, [key]: apartment }));
+    }
   }
 
   return { TIME_SLOTS, todayStr, bookingsForDay, myBookingsForDay, canBook, book, cancel };
